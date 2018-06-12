@@ -26,7 +26,6 @@ import (
 type DLserver struct {
 	WG    sync.WaitGroup
 	Gonum chan string
-	Img   chan []string
 }
 
 // BlogInfo 博客基本信息
@@ -342,7 +341,7 @@ func GetOtherPageEntryByAPI(blogInfo *BlogInfo) (eids []string) {
 				eids = append(eids, eid)
 			}
 		} else {
-			eids = []string{}
+			break
 		}
 	}
 	return
@@ -374,8 +373,6 @@ func GetImgURLByAPI(blogInfo *BlogInfo, eid string) (imgURLs []string) {
 			imgURL := imgHost + imgURIOrig
 			imgURLs = append(imgURLs, imgURL)
 		}
-	} else {
-		imgURLs = []string{}
 	}
 	sort.Strings(imgURLs)
 	imgURLs = removeDuplicate(imgURLs)
@@ -383,32 +380,30 @@ func GetImgURLByAPI(blogInfo *BlogInfo, eid string) (imgURLs []string) {
 }
 
 // getImgURLEngine 图片过滤引擎
-func getImgURLEngine(id int, e string, dl *DLserver, blogInfo *BlogInfo) {
-	log.Printf("<Blog ID %d> 解析图片地址\n", id)
+func getImgURLEngine(mid int, id int, e string, dl *DLserver, blogInfo *BlogInfo) {
+	log.Printf("<Master ID %d> <Blog ID %d> 解析图片地址\n", mid, id)
 	var imgurls []string
 	img := GetImgURLByAPI(blogInfo, e)
 	imgurls = append(imgurls, img...)
+	log.Printf("<Master ID %d> <Blog ID %d> 完成解析\n", mid, id)
+	imgTotal := len(imgurls)
+	log.Printf("<Master ID %d> <Blog ID %d> 有 %d 张图片(接口返回数据不准确)\n", mid, id, imgTotal)
+	DownloadManger(id, imgurls, blogInfo)
 	dl.WG.Done()
 	<-dl.Gonum
-	log.Printf("<Blog ID %d> 完成解析\n", id)
-	dl.Img <- imgurls
 }
 
 // GetImgList 并行获取图片地址
-func GetImgList(ym string, entries []string, blogInfo *BlogInfo) (imgList []string) {
+func GetImgList(mid int, entries []string, blogInfo *BlogInfo) {
 	dl := new(DLserver)
 	entryList := len(entries)
 	dl.WG.Add(entryList)
 	dl.Gonum = make(chan string, 8)
-	dl.Img = make(chan []string)
 	for id, e := range entries {
 		dl.Gonum <- e
-		go getImgURLEngine(id+1, e, dl, blogInfo)
+		go getImgURLEngine(mid, id+1, e, dl, blogInfo)
 	}
 	dl.WG.Wait()
-	imgList = <-dl.Img
-	imgTotal := len(imgList)
-	log.Printf("<%s> 有 %d 张图片(接口返回数据不准确)\n", ym, imgTotal)
 	return
 }
 
@@ -420,14 +415,14 @@ func downloadEngine(id int, img string, path string, dl *DLserver) {
 	savePath := path + "//" + filename
 	imgExist, _ := pathExists(savePath)
 	if !imgExist {
-		log.Printf("<Downlaod ID %d> [%s Downloading...]\n", id, filename)
+		log.Printf("---- <DID %d> [%s Downloading...]\n", id, filename)
 		res, _ := request("GET", img, nil, para, false)
 		defer res.Body.Close()
 		file, _ := os.Create(savePath)
 		io.Copy(file, res.Body)
-		log.Printf("<Downlaod ID %d> [%s is done]\n", id, filename)
+		log.Printf("---- <DID %d> [%s is done]\n", id, filename)
 	} else {
-		log.Printf("<File ID %d> [%s Exists]\n", id, filename)
+		log.Printf("---- <File ID %d> [%s Exists]\n", id, filename)
 	}
 	dl.WG.Done()
 	<-dl.Gonum
@@ -444,7 +439,7 @@ func DownloadManger(id int, imgurls []string, blogInfo *BlogInfo) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	tasks := len(imgurls)
 	dl.WG.Add(tasks)
-	log.Printf("<Master Task ID %d> 开始下载图片\n", id)
+	log.Printf("---- <Download Task ID %d> 开始下载\n", id)
 	dl.Gonum = make(chan string, 8)
 	// 执行下载
 	regDate := regexp.MustCompile(`2[0-9]{7}`)
@@ -459,13 +454,12 @@ func DownloadManger(id int, imgurls []string, blogInfo *BlogInfo) {
 		go downloadEngine(mid+1, img, subFolder, dl)
 	}
 	dl.WG.Wait()
-	log.Printf("<Master Task ID %d> 任务完成\n", id)
-	fmt.Println("----------------------------")
+	log.Printf("---- <Download Task ID %d> 下载完成\n", id)
 }
 
 // GetImgages 每抓取一个月执行下载
 func GetImgages(uris []string, blogInfo *BlogInfo) {
-	for id, ym := range uris {
+	for mid, ym := range uris {
 		url := blogInfo.host + "/imagelist-" + ym + ".html"
 		ymformat := ym[0:4] + "年" + ym[4:] + "月"
 		blogInfo.target = ym
@@ -473,12 +467,14 @@ func GetImgages(uris []string, blogInfo *BlogInfo) {
 		if len(firstEntries) == 0 {
 			log.Printf("<%s> 无数据", ymformat)
 		} else {
+			mid = mid + 1
 			nextEntries := GetOtherPageEntryByAPI(blogInfo)
 			entryALL := append(firstEntries, nextEntries...)
 			entryTotal := len(entryALL)
-			log.Printf("<%s> 获取到 %d 篇博客\n", ymformat, entryTotal)
-			imgurls := GetImgList(ymformat, entryALL, blogInfo)
-			DownloadManger(id+1, imgurls, blogInfo)
+			log.Printf("<Master ID %d> %s 获取到 %d 篇博客\n", mid, ymformat, entryTotal)
+			GetImgList(mid, entryALL, blogInfo)
+			log.Printf("<Master ID %d> 任务完成\n", mid)
+			fmt.Println("------------------------------")
 		}
 	}
 }
@@ -496,8 +492,8 @@ func main() {
 	if ok {
 		fmt.Print("Date range: ")
 		data2, _, _ := reader.ReadLine()
-		drange := string(data2)
-
+		drange := strings.TrimSpace(string(data2))
+		url = strings.TrimSpace(url)
 		bloginfo := new(BlogInfo)
 		bloginfo.author = strings.Split(url, "/")[3]
 		bloginfo.host = url
