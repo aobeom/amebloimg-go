@@ -380,56 +380,56 @@ func GetImgURLByAPI(blogInfo *BlogInfo, eid string) (imgURLs []string) {
 }
 
 // getImgURLEngine 图片过滤引擎
-func getImgURLEngine(mid int, id int, e string, dl *DLserver, blogInfo *BlogInfo) {
-	log.Printf("<Master ID %d> <Blog ID %d> 解析图片地址\n", mid, id)
+func getImgURLEngine(mid int, id int, ymformat string, e string, dl *DLserver, blogInfo *BlogInfo) {
+	log.Printf("<Master ID %d> %s <Blog ID %d> 解析图片地址\n", mid, ymformat, id)
 	var imgurls []string
 	img := GetImgURLByAPI(blogInfo, e)
 	imgurls = append(imgurls, img...)
-	log.Printf("<Master ID %d> <Blog ID %d> 完成解析\n", mid, id)
+	log.Printf("<Master ID %d> %s <Blog ID %d> 完成解析\n", mid, ymformat, id)
 	imgTotal := len(imgurls)
-	log.Printf("<Master ID %d> <Blog ID %d> 有 %d 张图片(接口返回数据不准确)\n", mid, id, imgTotal)
-	DownloadManger(id, imgurls, blogInfo)
+	log.Printf("<Master ID %d> %s <Blog ID %d> 有 %d 张图片(接口返回数据不准确)\n", mid, ymformat, id, imgTotal)
+	DownloadManger(mid, id, ymformat, imgurls, blogInfo)
 	dl.WG.Done()
 	<-dl.Gonum
 }
 
 // GetImgList 并行获取图片地址
-func GetImgList(mid int, entries []string, blogInfo *BlogInfo) {
+func GetImgList(mid int, ymformat string, entries []string, blogInfo *BlogInfo) {
 	dl := new(DLserver)
 	entryList := len(entries)
 	dl.WG.Add(entryList)
 	dl.Gonum = make(chan string, 8)
 	for id, e := range entries {
 		dl.Gonum <- e
-		go getImgURLEngine(mid, id+1, e, dl, blogInfo)
+		go getImgURLEngine(mid, id+1, ymformat, e, dl, blogInfo)
 	}
 	dl.WG.Wait()
 	return
 }
 
 // downloadEngine 下载函数
-func downloadEngine(id int, img string, path string, dl *DLserver) {
+func downloadEngine(mid int, bid int, id int, ymformat string, img string, path string, dl *DLserver) {
 	para := make(map[string]string)
 	urlCut := strings.Split(img, "/")
 	filename := urlCut[len(urlCut)-1]
 	savePath := path + "//" + filename
 	imgExist, _ := pathExists(savePath)
 	if !imgExist {
-		log.Printf("---- <DID %d> [%s Downloading...]\n", id, filename)
+		log.Printf("<Master ID %d> %s <Blog ID %d> <DID %d> [%s Downloading...]\n", mid, ymformat, bid, id, filename)
 		res, _ := request("GET", img, nil, para, false)
 		defer res.Body.Close()
 		file, _ := os.Create(savePath)
 		io.Copy(file, res.Body)
-		log.Printf("---- <DID %d> [%s is done]\n", id, filename)
+		log.Printf("<Master ID %d> %s <Blog ID %d> <DID %d> [%s is done]\n", mid, ymformat, bid, id, filename)
 	} else {
-		log.Printf("---- <File ID %d> [%s Exists]\n", id, filename)
+		log.Printf("<Master ID %d> %s <Blog ID %d> <File ID %d> [%s Exists]\n", mid, ymformat, bid, id, filename)
 	}
 	dl.WG.Done()
 	<-dl.Gonum
 }
 
 // DownloadManger 图片下载管理
-func DownloadManger(id int, imgurls []string, blogInfo *BlogInfo) {
+func DownloadManger(mid int, bid int, ymformat string, imgurls []string, blogInfo *BlogInfo) {
 	mainFolder := getCurrentDirectory() + "//" + blogInfo.author
 	mainExist, _ := pathExists(mainFolder)
 	if !mainExist {
@@ -439,22 +439,30 @@ func DownloadManger(id int, imgurls []string, blogInfo *BlogInfo) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	tasks := len(imgurls)
 	dl.WG.Add(tasks)
-	log.Printf("---- <Download Task ID %d> 开始下载\n", id)
+	log.Printf("<Master ID %d> %s <Download Blog ID %d> 开始下载\n", mid, ymformat, bid)
 	dl.Gonum = make(chan string, 8)
 	// 执行下载
 	regDate := regexp.MustCompile(`2[0-9]{7}`)
-	for mid, img := range imgurls {
+	for did, img := range imgurls {
 		dl.Gonum <- img
-		savename := regDate.FindAllString(img, -1)[0]
+		var savename string
+		// http://stat.ameba.jp/blog/img/filtering_ng.jpg
+		urlPart := regDate.FindAllString(img, -1)
+		if len(urlPart) > 0 {
+			savename = urlPart[0]
+		} else {
+			savename = "filtering_ng"
+			log.Printf("<Master ID %d> %s <Download Blog ID %d> 图片失效或NG\n", mid, ymformat, bid)
+		}
 		subFolder := mainFolder + "//" + savename
 		subExist, _ := pathExists(subFolder)
 		if !subExist {
 			os.Mkdir(subFolder, os.ModePerm)
 		}
-		go downloadEngine(mid+1, img, subFolder, dl)
+		go downloadEngine(mid, bid, did+1, ymformat, img, subFolder, dl)
 	}
 	dl.WG.Wait()
-	log.Printf("---- <Download Task ID %d> 下载完成\n", id)
+	log.Printf("<Master ID %d> %s <Download Blog ID %d> 下载完成\n", mid, ymformat, bid)
 }
 
 // GetImgages 每抓取一个月执行下载
@@ -472,7 +480,7 @@ func GetImgages(uris []string, blogInfo *BlogInfo) {
 			entryALL := append(firstEntries, nextEntries...)
 			entryTotal := len(entryALL)
 			log.Printf("<Master ID %d> %s 获取到 %d 篇博客\n", mid, ymformat, entryTotal)
-			GetImgList(mid, entryALL, blogInfo)
+			GetImgList(mid, ymformat, entryALL, blogInfo)
 			log.Printf("<Master ID %d> 任务完成\n", mid)
 			fmt.Println("------------------------------")
 		}
@@ -503,6 +511,8 @@ func main() {
 			fmt.Printf("需要解析 %d 个月的数据...\n", urisTotal)
 			GetImgages(uris, bloginfo)
 		}
+		fmt.Printf("filtering_ng文件夹存在即有被屏蔽的文章\n")
+		fmt.Printf("图片为空说明该图被屏蔽\n\n")
 		fmt.Printf("所有任务完成\n\n")
 		fmt.Println("Ctrl+C to exit.")
 		c := make(chan os.Signal, 1)
